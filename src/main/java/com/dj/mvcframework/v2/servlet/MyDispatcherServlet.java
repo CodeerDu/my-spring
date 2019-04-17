@@ -2,6 +2,7 @@ package com.dj.mvcframework.v2.servlet;
 
 import com.dj.mvcframework.annotation.*;
 
+
 import javax.servlet.ServletConfig;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
@@ -14,6 +15,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MyDispatcherServlet extends HttpServlet {
     //存储 aplication.properties 的配置内容
@@ -23,7 +26,9 @@ public class MyDispatcherServlet extends HttpServlet {
     //IOC 容器，保存所有实例化对象
     private Map<String,Object> ioc = new HashMap<String,Object>();
     //保存 Contrller 中所有 Mapping 的对应关系
-    private Map<String, Method> handlerMapping = new HashMap<String,Method>();
+//    private Map<String, Method> handlerMapping = new HashMap<String,Method>();
+    //保存所有的 Url 和方法的映射关系
+    private List<Handler> handlerMapping = new ArrayList<Handler>();
 
     @Override
     public void init(ServletConfig config) throws ServletException {
@@ -48,7 +53,7 @@ public class MyDispatcherServlet extends HttpServlet {
             e.printStackTrace();
         }
     }
-
+/**
     private void doDispatch(HttpServletRequest req, HttpServletResponse resp) throws Exception {
         String url = req.getRequestURI();
         String contextPath = req.getContextPath();
@@ -87,6 +92,7 @@ public class MyDispatcherServlet extends HttpServlet {
         String beanName = toLowerFirstCase(method.getDeclaringClass().getSimpleName());
         method.invoke(ioc.get(beanName),new Object[]{req,resp,params.get("name")[0]});
     }
+**/
 
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
@@ -183,7 +189,7 @@ public class MyDispatcherServlet extends HttpServlet {
             }
         }
     }
-
+    /**
     private void initHandlerMapping() {
         if(ioc.isEmpty()){ return; }
         for (Map.Entry<String, Object> entry : ioc.entrySet()) {
@@ -209,6 +215,88 @@ public class MyDispatcherServlet extends HttpServlet {
             }
         }
     }
+     **/
+    private void initHandlerMapping(){
+        if(ioc.isEmpty()){ return; }
+        for (Map.Entry<String, Object> entry : ioc.entrySet()) {
+            Class<?> clazz = entry.getValue().getClass();
+            if(!clazz.isAnnotationPresent(MyController.class)){ continue; }
+            String url = "";
+//获取 Controller 的 url 配置
+            if(clazz.isAnnotationPresent(MyRequestMapping.class)){
+                MyRequestMapping requestMapping = clazz.getAnnotation(MyRequestMapping.class);
+                url = requestMapping.value();
+            }
+//获取 Method 的 url 配置
+            Method [] methods = clazz.getMethods();
+            for (Method method : methods) {
+//没有加 RequestMapping 注解的直接忽略
+                if(!method.isAnnotationPresent(MyRequestMapping.class)){ continue; }
+//映射 URL
+                MyRequestMapping requestMapping = method.getAnnotation(MyRequestMapping.class);
+                String regex = ("/" + url + requestMapping.value()).replaceAll("/+", "/");
+                Pattern pattern = Pattern.compile(regex);
+                handlerMapping.add(new Handler(pattern,entry.getValue(),method));
+                System.out.println("mapping " + regex + "," + method);
+            }
+        }
+    }
+
+    private void doDispatch(HttpServletRequest req,HttpServletResponse resp) throws Exception{
+        try{
+            Handler handler = getHandler(req);
+            if(handler == null){
+//如果没有匹配上，返回 404 错误
+                resp.getWriter().write("404 Not Found");
+                return;
+            }
+//获取方法的参数列表
+            Class<?> [] paramTypes = handler.method.getParameterTypes();
+//保存所有需要自动赋值的参数值
+            Object [] paramValues = new Object[paramTypes.length];
+            Map<String,String[]> params = req.getParameterMap();
+            for (Map.Entry<String, String[]> param : params.entrySet()) {
+                String value = Arrays.toString(param.getValue()).replaceAll("\\[|\\]",
+                        "").replaceAll(",\\s", ",");
+//如果找到匹配的对象，则开始填充参数值
+                if(!handler.paramIndexMapping.containsKey(param.getKey())){continue;}
+                int index = handler.paramIndexMapping.get(param.getKey());
+                paramValues[index] = convert(paramTypes[index],value);
+            }
+//设置方法中的 request 和 response 对象
+            int reqIndex = handler.paramIndexMapping.get(HttpServletRequest.class.getName());
+            paramValues[reqIndex] = req;
+            int respIndex = handler.paramIndexMapping.get(HttpServletResponse.class.getName());
+            paramValues[respIndex] = resp;
+            handler.method.invoke(handler.controller, paramValues);
+        }catch(Exception e){
+            throw e;
+        }
+    }
+    private Handler getHandler(HttpServletRequest req) throws Exception{
+        if(handlerMapping.isEmpty()){ return null; }
+        String url = req.getRequestURI();
+        String contextPath = req.getContextPath();
+        url = url.replace(contextPath, "").replaceAll("/+", "/");
+        for (Handler handler : handlerMapping) {
+            try{
+                Matcher matcher = handler.pattern.matcher(url);
+//如果没有匹配上继续下一个匹配
+                if(!matcher.matches()){ continue; }
+                return handler;
+            }catch(Exception e){
+                throw e;
+            }
+        }
+        return null;
+    }
+    private Object convert(Class<?> type,String value){
+        if(Integer.class == type){
+            return Integer.valueOf(value);
+        }
+        return value;
+    }
+    
     private String toLowerFirstCase(String simpleName) {
         char [] chars = simpleName.toCharArray();
         chars[0] += 32;
